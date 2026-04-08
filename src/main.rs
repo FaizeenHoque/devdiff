@@ -80,10 +80,10 @@ async fn request_model(
     let system_prompt = build_prompt(extra);
 
     let res = client
-        .post("https://ai.hackclub.com/proxy/v1/chat/completions")
+        .post("https://openrouter.ai/api/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&serde_json::json!({
-            "model": "google/gemini-3-flash-preview",
+            "model": "nvidia/nemotron-3-super-120b-a12b:free",
             "max_tokens": 2048,
             "messages": [
                 {"role": "system", "content": system_prompt},
@@ -93,12 +93,15 @@ async fn request_model(
         .send()
         .await?;
 
-    let json = res.json::<serde_json::Value>().await?;
-    let content = json["choices"][0]["message"]["content"]
-        .as_str()
-        .unwrap_or("Error: could not parse response");
+    let json: serde_json::Value = res.json().await?;
 
-    println!("{}", content);
+    // Safely extract AI response
+    let ai_response = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("Error: could not parse AI response");
+
+    println!("{}", ai_response);
+
     Ok(())
 }
 
