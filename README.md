@@ -57,12 +57,22 @@ Initialize configuration:
 devdiff init
 ```
 
-Enter your API key when prompted.
+You will be prompted for:
 
-The key is stored in:
+1. **OpenRouter model name** – e.g., `nvidia/nemotron-3-super-120b-a12b:free`.
+2. **OpenRouter API key** – your personal API key from OpenRouter.
+
+The credentials are saved in:
 
 ```
 ~/.config/devdiff/.env
+```
+
+Example `.env` file contents:
+
+```
+MODEL_NAME=nvidia/nemotron-3-super-120b-a12b:free
+MODEL_API_KEY=your_api_key_here
 ```
 
 ---
@@ -107,20 +117,20 @@ DevDiff prints structured output directly in your terminal.
 
 DevDiff reads git diffs using libgit2.
 
-It sends the diff to an AI model.
+It sends the diff to the AI model you configured.
 
 The model returns:
 
-SUMMARY
+**SUMMARY**
 High level description of the change.
 
-CHANGES
+**CHANGES**
 Specific modifications grouped logically.
 
-ARCHITECTURAL IMPACT
+**ARCHITECTURAL IMPACT**
 Effect on structure, performance, or maintainability.
 
-POTENTIAL ISSUES
+**POTENTIAL ISSUES**
 Anything risky or incorrect.
 
 When you analyze staged changes, DevDiff also suggests a commit message.
