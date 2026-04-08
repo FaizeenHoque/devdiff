@@ -1,5 +1,6 @@
-use clap::Parser;
+use clap::{Parser, Subcommand};
 use futures_util::StreamExt;
+use std::io::Write;
 
 #[derive(Parser, Debug)]
 #[command(version, about, long_about = None)]
@@ -9,6 +10,22 @@ struct Args {
 
     #[arg(short, long, default_value_t = 1)]
     number: u32,
+
+    #[arg(short, long)]
+    raw: bool,
+
+    /// Analyze a specific commit by hash
+    #[arg(long)]
+    hash: Option<String>,
+
+    #[command(subcommand)]
+    command: Option<Commands>,
+}
+
+#[derive(Subcommand, Debug)]
+enum Commands {
+    /// Set up DevDiff config interactively
+    Init,
 }
 
 const SHARED_RULES: &str = r#"Rules you must follow:
@@ -53,11 +70,6 @@ async fn request_model(
     content: &str,
     type_: u8,
 ) -> anyhow::Result<()> {
-    // type 0 -> latest commit(s)
-    // type 1 -> staged changes
-    // type 2 -> unstaged changes
-    // type 3 -> selected commit
-
     let extra = match type_ {
         1 => {
             "SUGGESTED COMMIT MESSAGE\n        Write a single conventional commit message that accurately describes this change. Format: type(scope): description. Example: feat(auth): add token refresh on 401 response."
@@ -96,7 +108,6 @@ async fn request_model(
                 if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
                     if let Some(token) = json["choices"][0]["delta"]["content"].as_str() {
                         print!("{}", token);
-                        use std::io::Write;
                         std::io::stdout().flush()?;
                     }
                 }
@@ -120,7 +131,6 @@ fn get_diff_for_commits(number: u32) -> anyhow::Result<String> {
 
         let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None)?;
 
-        // Add a header per commit when analyzing multiple
         if number > 1 {
             diff_text.push_str(&format!(
                 "\n--- Commit {} ({}) ---\n",
@@ -137,6 +147,27 @@ fn get_diff_for_commits(number: u32) -> anyhow::Result<String> {
 
         commit = parent;
     }
+
+    Ok(diff_text)
+}
+
+fn get_diff_for_hash(hash: &str) -> anyhow::Result<String> {
+    let repo = git2::Repository::open(".")?;
+    let oid = git2::Oid::from_str(hash)?;
+    let commit = repo.find_commit(oid)?;
+    let commit_tree = commit.tree()?;
+
+    let parent = commit.parent(0)?;
+    let parent_tree = parent.tree()?;
+
+    let diff = repo.diff_tree_to_tree(Some(&parent_tree), Some(&commit_tree), None)?;
+
+    let mut diff_text = String::new();
+    diff.print(git2::DiffFormat::Patch, |_delta, _hunk, line| {
+        let content = std::str::from_utf8(line.content()).unwrap_or("");
+        diff_text.push_str(content);
+        true
+    })?;
 
     Ok(diff_text)
 }
@@ -159,30 +190,78 @@ fn get_staged() -> anyhow::Result<String> {
     Ok(diff_text)
 }
 
+fn run_init() -> anyhow::Result<()> {
+    let config_dir = dirs::home_dir()
+        .expect("Could not find home directory")
+        .join(".config/devdiff");
+
+    std::fs::create_dir_all(&config_dir)?;
+
+    let env_path = config_dir.join(".env");
+
+    print!("Enter your API key: ");
+    std::io::stdout().flush()?;
+
+    let mut api_key = String::new();
+    std::io::stdin().read_line(&mut api_key)?;
+    let api_key = api_key.trim();
+
+    if api_key.is_empty() {
+        eprintln!("Error: API key cannot be empty");
+        std::process::exit(1);
+    }
+
+    std::fs::write(&env_path, format!("MODEL_API_KEY={}\n", api_key))?;
+
+    println!("✓ Config saved to {}", env_path.display());
+    Ok(())
+}
+
 #[tokio::main]
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    // Handle init subcommand before anything else
+    if let Some(Commands::Init) = args.command {
+        return run_init();
+    }
 
     let config_path = dirs::home_dir()
         .expect("Could not find home directory")
         .join(".config/devdiff/.env");
     dotenvy::from_path(config_path).ok();
 
-    let api_key = std::env::var("MODEL_API_KEY").expect("API_KEY not set");
+    let api_key = std::env::var("MODEL_API_KEY").expect("API_KEY not set — run `devdiff init`");
     let client = reqwest::Client::new();
 
+    // Validate flag combos
     if args.staged && args.number > 1 {
         eprintln!("Error: --staged and --number cannot be used together");
         std::process::exit(1);
     }
-
-    if args.staged {
-        let staged = get_staged()?;
-        request_model(&client, &api_key, &staged, 1).await?;
-    } else {
-        let diff = get_diff_for_commits(args.number)?;
-        request_model(&client, &api_key, &diff, 0).await?;
+    if args.staged && args.hash.is_some() {
+        eprintln!("Error: --staged and --hash cannot be used together");
+        std::process::exit(1);
     }
+
+    // Get the diff
+    let diff = if args.staged {
+        get_staged()?
+    } else if let Some(ref hash) = args.hash {
+        get_diff_for_hash(hash)?
+    } else {
+        get_diff_for_commits(args.number)?
+    };
+
+    // Raw mode — just print the diff
+    if args.raw {
+        println!("{}", diff);
+        return Ok(());
+    }
+
+    // AI analysis
+    let type_ = if args.staged { 1 } else { 0 };
+    request_model(&client, &api_key, &diff, type_).await?;
 
     println!("\n⚠  AI can make mistakes. Double-check responses.");
     Ok(())
