@@ -1,5 +1,4 @@
 use clap::{Parser, Subcommand};
-use futures_util::StreamExt;
 use std::io::Write;
 
 #[derive(Parser, Debug)]
@@ -29,13 +28,14 @@ enum Commands {
 }
 
 const SHARED_RULES: &str = r#"Rules you must follow:
+- Always start your response with "SUMMARY" on the first line. Never begin mid-sentence or mid-thought.
 - Be direct and technical. The user is a developer, not a manager.
 - Never explain what a diff is or how Git works.
 - Never add encouragement, praise, or filler phrases like "Great change!" or "This looks good!".
 - If the diff is empty or contains no meaningful changes, say "Nothing to analyze." and stop.
 - If the diff contains only whitespace or formatting changes, say so explicitly.
 - Keep your total output scannable. This is a terminal tool — walls of text are useless.
-- The diff uses standard Git format. Lines starting with - are DELETED and DO NOT EXIST in the current codebase. Lines starting with + are ADDED and represent the current state. Lines starting with (space) are unchanged context. You must NEVER report issues about - lines. If you do, you are wrong."#;
+- The diff uses standard Git format. Lines starting with `-` are DELETED and DO NOT EXIST in the current codebase. Lines starting with `+` are ADDED and represent the current state. Lines starting with ` ` (space) are unchanged context. You must NEVER report issues about `-` lines. If you do, you are wrong."#;
 
 fn build_prompt(extra: &str) -> String {
     format!(
@@ -72,7 +72,7 @@ async fn request_model(
 ) -> anyhow::Result<()> {
     let extra = match type_ {
         1 => {
-            "SUGGESTED COMMIT MESSAGE\n Write a single conventional commit message that accurately describes this change. Format: type(scope): description. Example: feat(auth): add token refresh on 401 response."
+            "SUGGESTED COMMIT MESSAGE\nWrite a single conventional commit message that accurately describes this change. Format: type(scope): description. Example: feat(auth): add token refresh on 401 response."
         }
         _ => "",
     };
@@ -83,39 +83,22 @@ async fn request_model(
         .post("https://ai.hackclub.com/proxy/v1/chat/completions")
         .header("Authorization", format!("Bearer {}", api_key))
         .json(&serde_json::json!({
-        "model": "google/gemini-3-flash-preview",
-        "stream": true,
-        "messages": [
-        {"role": "system", "content": system_prompt},
-        {"role": "user", "content": format!("Analyze this git diff:\n\n{}", content)}
-        ]
+            "model": "google/gemini-3-flash-preview",
+            "max_tokens": 2048,
+            "messages": [
+                {"role": "system", "content": system_prompt},
+                {"role": "user", "content": format!("Analyze this git diff:\n\n{}", content)}
+            ]
         }))
         .send()
         .await?;
 
-    let mut stream = res.bytes_stream();
+    let json = res.json::<serde_json::Value>().await?;
+    let content = json["choices"][0]["message"]["content"]
+        .as_str()
+        .unwrap_or("Error: could not parse response");
 
-    while let Some(chunk) = stream.next().await {
-        let chunk = chunk?;
-        let text = String::from_utf8_lossy(&chunk);
-
-        for line in text.lines() {
-            if line.starts_with("data: ") {
-                let data = &line["data: ".len()..];
-                if data == "[DONE]" {
-                    break;
-                }
-                if let Ok(json) = serde_json::from_str::<serde_json::Value>(data) {
-                    if let Some(token) = json["choices"][0]["delta"]["content"].as_str() {
-                        print!("{}", token);
-                        std::io::stdout().flush()?;
-                    }
-                }
-            }
-        }
-    }
-
-    println!();
+    println!("{}", content);
     Ok(())
 }
 
@@ -221,7 +204,6 @@ fn run_init() -> anyhow::Result<()> {
 async fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
-    // Handle init subcommand before anything else
     if let Some(Commands::Init) = args.command {
         return run_init();
     }
@@ -231,10 +213,9 @@ async fn main() -> anyhow::Result<()> {
         .join(".config/devdiff/.env");
     dotenvy::from_path(config_path).ok();
 
-    let api_key = std::env::var("MODEL_API_KEY").expect("API_KEY not set — run devdiff init");
+    let api_key = std::env::var("MODEL_API_KEY").expect("API_KEY not set — run `devdiff init`");
     let client = reqwest::Client::new();
 
-    // Validate flag combos
     if args.staged && args.number > 1 {
         eprintln!("Error: --staged and --number cannot be used together");
         std::process::exit(1);
@@ -243,8 +224,11 @@ async fn main() -> anyhow::Result<()> {
         eprintln!("Error: --staged and --hash cannot be used together");
         std::process::exit(1);
     }
+    if args.hash.is_some() && args.number > 1 {
+        eprintln!("Error: --hash and --number cannot be used together");
+        std::process::exit(1);
+    }
 
-    // Get the diff
     let diff = if args.staged {
         get_staged()?
     } else if let Some(ref hash) = args.hash {
@@ -253,16 +237,14 @@ async fn main() -> anyhow::Result<()> {
         get_diff_for_commits(args.number)?
     };
 
-    // Raw mode — just print the diff
     if args.raw {
         println!("{}", diff);
         return Ok(());
     }
 
-    // AI analysis
     let type_ = if args.staged { 1 } else { 0 };
     request_model(&client, &api_key, &diff, type_).await?;
 
-    println!("\n⚠ AI can make mistakes. Double-check responses.");
+    println!("\n⚠  AI can make mistakes. Double-check responses.");
     Ok(())
 }
